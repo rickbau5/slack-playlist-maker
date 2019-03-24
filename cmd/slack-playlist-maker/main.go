@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nlopes/slack"
@@ -57,92 +60,104 @@ func run(config Config) error {
 
 	rtm := api.NewRTM(slack.RTMOptionUseStart(false))
 
+	hardErrorChan := make(chan error)
+	tracks := make(chan TrackID, 10)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go rtm.ManageConnection()
+	go processRTM(ctx, rtm, tracks, hardErrorChan)
+	go processTracks(ctx, tracks)
 
-	for msg := range rtm.IncomingEvents {
-		switch ev := msg.Data.(type) {
-		case *slack.HelloEvent:
-			// Ignore hello
+	select {
+	case err := <-hardErrorChan:
+		log.Println("Got hard error, stopping:", err)
+		cancel()
+		return err
+	}
+}
 
-		case *slack.ConnectedEvent:
-			fmt.Println("Infos:", ev.Info)
-			fmt.Println("Connection counter:", ev.ConnectionCount)
-			// Replace C2147483705 with your Channel ID
-			// rtm.SendMessage(rtm.NewOutgoingMessage("Hello world", "C2147483705"))
+func processRTM(ctx context.Context, rtm *slack.RTM, tracks chan TrackID, errorChan chan <-error) {
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Context done:", ctx.Err())
+			return
 
-		case *slack.MessageEvent:
-			if err := processMessage(ev); err != nil {
-				log.Println("Failed processing message:", ev)
-				continue
+		case msg, ok := <-rtm.IncomingEvents:
+			if !ok {
+				// all done
+				log.Println("RTM IncomingEvents close.")
+				return
 			}
 
-		case *slack.PresenceChangeEvent:
-			fmt.Printf("Presence Change: %v\n", ev)
+			if err := processEvent(msg, tracks); err != nil {
+				errorChan <- err
+			}
+		}
+	}
+}
 
-		case *slack.LatencyReport:
-			fmt.Printf("Current latency: %v\n", ev.Value)
+func processEvent(msg slack.RTMEvent, tracks chan TrackID) error {
+	switch ev := msg.Data.(type) {
+	case *slack.ConnectedEvent:
+		fmt.Println("Infos:", ev.Info)
+		fmt.Println("Connection counter:", ev.ConnectionCount)
 
-		case *slack.RTMError:
-			fmt.Printf("Error: %s\n", ev.Error())
-
-		case *slack.InvalidAuthEvent:
-			fmt.Println("Invalid credentials")
-			return errors.New("invalid credentials")
-
-		default:
-			fmt.Printf("Other: %v\n", msg.Data)
-
-			// Ignore other events..
-			// fmt.Printf("Unexpected: %v\n", msg.Data)
+	case *slack.MessageEvent:
+		if err := processMessage(ev, tracks); err != nil {
+			log.Println("Failed processing message:", ev)
+			return nil
 		}
 
+	case *slack.RTMError:
+		fmt.Printf("Error: %s\n", ev.Error())
+
+	case *slack.InvalidAuthEvent:
+		fmt.Println("Invalid credentials")
+		return errors.New("invalid credentials")
+
+	default:
+		// ignore any other eent
 	}
 
 	return nil
 }
 
-func processMessage(message *slack.MessageEvent) error {
-	if len(message.Attachments) == 0 {
-		log.Println("Message has no attachments, ignoring.")
-		return nil
-	}
+func processMessage(message *slack.MessageEvent, tracks chan TrackID) error {
+	words := strings.Split(message.Text, " ")
 
-	for _, attachment := range message.Attachments {
-		spotifyAttachment, err := getSpotifyAttachment(attachment)
-		if err != nil {
-			log.Println("Error getting spotify attachment:", err)
+	for _, word := range words {
+		word = strings.Trim(word, "<>")
+		trackID, ok := getSpotifyTrackLink(word)
+		if !ok {
 			continue
 		}
-
-		log.Printf("Spotify Attachment found: %#v\n", spotifyAttachment)
+		tracks <- trackID
 	}
 
 	return nil
 }
 
-type SpotifyAttachment struct {
-	Service string `json:"service"`
-	TitleLink string `json:"title_link"`
-}
+type TrackID string
 
-func getSpotifyAttachment(attachment slack.Attachment) (*SpotifyAttachment, error) {
-	var sa SpotifyAttachment
+func getSpotifyTrackLink(str string) (TrackID, bool) {
+	// try parsing as a URL
+	if u, err := url.Parse(str); err == nil {
+		if !strings.Contains(u.Host, "spotify.com") && strings.Contains(u.Path, "/track/") {
+			return "", false
+		}
 
-	for _, field := range attachment.Fields {
-		switch field.Title {
-		case "service", "Service":
-			if field.Value != "Spotify" {
-				return nil, errors.New("not a spotify attachment")
-			}
-			sa.Service = field.Value
-		case "title_link", "TitleLink":
-			sa.TitleLink = field.Value
+		parts := strings.Split(u.Path, "/")
+		if len(parts) == 2 {
+			return TrackID(parts[1]), true
 		}
 	}
 
-	if sa.Service == "" {
-		return nil, errors.New("unknown attachment service")
-	}
+	return "", false
+}
 
-	return &sa, nil
+func processTracks(ctx context.Context, tracks chan TrackID) {
+	// todo
 }
