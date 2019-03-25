@@ -4,3 +4,12 @@
 [submodule "vendor/github.com/urfave/cli"]
 	path = vendor/github.com/urfave/cli
 	url = https://github.com/urfave/cli
+[submodule "vendor/github.com/zmb3/spotify"]
+	path = vendor/github.com/zmb3/spotify
+	url = https://github.com/zmb3/spotify
+[submodule "vendor/golang.org/x/oauth2"]
+	path = vendor/golang.org/x/oauth2
+	url = https://github.com/golang/oauth2
+[submodule "vendor/golang.org\\x\\net"]
+	path = vendor/golang.org\\x\\net
+	url = https://github.com/golang/net

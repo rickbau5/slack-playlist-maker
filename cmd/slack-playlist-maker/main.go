@@ -13,10 +13,16 @@ import (
 
 	"github.com/nlopes/slack"
 	"github.com/urfave/cli"
+	"github.com/zmb3/spotify"
 )
 
 type Config struct {
-	SlackToken string `json:"-"`
+	ListenAddress      string `json:"listen_address"`
+	SlackToken         string `json:"-"`
+	SpotifyID          string `json:"-"`
+	SpotifySecret      string `json:"-"`
+	SpotifyRedirectURI string `json:"spotify_redirect_uri"`
+	SpotifyPlaylistID  string `json:"spotify_playlist_id"`
 }
 
 func main() {
@@ -31,11 +37,46 @@ func main() {
 
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
+			Usage:       "Specify the listen address for the http server.",
+			Name:        "listen-addr",
+			Value:       ":8080",
+			EnvVar:      "LISTEN_ADDR",
+			Destination: &config.ListenAddress,
+		},
+		cli.StringFlag{
 			Usage:       "Specify the Slack Token",
 			Name:        "slack-token",
 			Value:       "",
 			EnvVar:      "SLACK_TOKEN",
 			Destination: &config.SlackToken,
+		},
+		cli.StringFlag{
+			Usage:       "Specify Spotify ID",
+			Name:        "spotify-id",
+			Value:       "",
+			EnvVar:      "SPOTIFY_ID",
+			Destination: &config.SpotifyID,
+		},
+		cli.StringFlag{
+			Usage:       "Specify Spotify Secret",
+			Name:        "spotify-secret",
+			Value:       "",
+			EnvVar:      "SPOTIFY_SECRET",
+			Destination: &config.SpotifySecret,
+		},
+		cli.StringFlag{
+			Usage:       "Specify Spotify Redirect URI",
+			Name:        "spotify-redirect-uri",
+			Value:       "http://localhost:8080/spotify/callback/",
+			EnvVar:      "SPOTIFY_REDIRECT_URI",
+			Destination: &config.SpotifyRedirectURI,
+		},
+		cli.StringFlag{
+			Usage:       "Specify Spotify Playlist ID",
+			Name:        "spotify-playlist-id",
+			Value:       "",
+			EnvVar:      "SPOTIFY_PLAYLIST_ID",
+			Destination: &config.SpotifyPlaylistID,
 		},
 	}
 
@@ -49,6 +90,27 @@ func main() {
 }
 
 func run(config Config) error {
+	var (
+		hardErrorChan = make(chan error)
+		tracks        = make(chan spotify.ID, 10)
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go startSlackIntegration(ctx, tracks, hardErrorChan, config)
+	time.Sleep(1 * time.Second)
+	go startSpotifyIntegration(ctx, tracks, hardErrorChan, config)
+
+	select {
+	case err := <-hardErrorChan:
+		log.Println("Got hard error, stopping:", err)
+		cancel()
+		return err
+	}
+}
+
+func startSlackIntegration(ctx context.Context, tracks chan<- spotify.ID, hardErrorChan chan<- error, config Config) {
 	api := slack.New(
 		config.SlackToken,
 		slack.OptionDebug(true),
@@ -60,25 +122,7 @@ func run(config Config) error {
 
 	rtm := api.NewRTM(slack.RTMOptionUseStart(false))
 
-	hardErrorChan := make(chan error)
-	tracks := make(chan TrackID, 10)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	go rtm.ManageConnection()
-	go processRTM(ctx, rtm, tracks, hardErrorChan)
-	go processTracks(ctx, tracks)
-
-	select {
-	case err := <-hardErrorChan:
-		log.Println("Got hard error, stopping:", err)
-		cancel()
-		return err
-	}
-}
-
-func processRTM(ctx context.Context, rtm *slack.RTM, tracks chan TrackID, errorChan chan <-error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -88,18 +132,18 @@ func processRTM(ctx context.Context, rtm *slack.RTM, tracks chan TrackID, errorC
 		case msg, ok := <-rtm.IncomingEvents:
 			if !ok {
 				// all done
-				log.Println("RTM IncomingEvents close.")
+				log.Println("RTM IncomingEvents closed.")
 				return
 			}
 
 			if err := processEvent(msg, tracks); err != nil {
-				errorChan <- err
+				hardErrorChan <- err
 			}
 		}
 	}
 }
 
-func processEvent(msg slack.RTMEvent, tracks chan TrackID) error {
+func processEvent(msg slack.RTMEvent, tracks chan<- spotify.ID) error {
 	switch ev := msg.Data.(type) {
 	case *slack.ConnectedEvent:
 		fmt.Println("Infos:", ev.Info)
@@ -125,7 +169,7 @@ func processEvent(msg slack.RTMEvent, tracks chan TrackID) error {
 	return nil
 }
 
-func processMessage(message *slack.MessageEvent, tracks chan TrackID) error {
+func processMessage(message *slack.MessageEvent, tracks chan<- spotify.ID) error {
 	words := strings.Split(message.Text, " ")
 
 	for _, word := range words {
@@ -134,15 +178,14 @@ func processMessage(message *slack.MessageEvent, tracks chan TrackID) error {
 		if !ok {
 			continue
 		}
+		log.Println("Pushing track:", trackID)
 		tracks <- trackID
 	}
 
 	return nil
 }
 
-type TrackID string
-
-func getSpotifyTrackLink(str string) (TrackID, bool) {
+func getSpotifyTrackLink(str string) (spotify.ID, bool) {
 	// try parsing as a URL
 	if u, err := url.Parse(str); err == nil {
 		if !strings.Contains(u.Host, "spotify.com") && strings.Contains(u.Path, "/track/") {
@@ -150,14 +193,10 @@ func getSpotifyTrackLink(str string) (TrackID, bool) {
 		}
 
 		parts := strings.Split(u.Path, "/")
-		if len(parts) == 2 {
-			return TrackID(parts[1]), true
+		if len(parts) >= 2 {
+			return spotify.ID(parts[len(parts)-1]), true
 		}
 	}
 
 	return "", false
-}
-
-func processTracks(ctx context.Context, tracks chan TrackID) {
-	// todo
 }
