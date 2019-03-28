@@ -34,13 +34,13 @@ func NewServer(handler *SpotifyHandler, listenAddr string) *Server {
 	}
 }
 
-func (server *Server) Start() error {
-	var err error
-	server.startOnce.Do(func() {
-		err = server.server.ListenAndServe()
+func (server *Server) Start() {
+	go server.startOnce.Do(func() {
+		if err := server.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			// not ideal but need this to surface
+			log.Fatalln("Failed starting server:", err)
+		}
 	})
-
-	return err
 }
 
 func (server *Server) Stop() error {

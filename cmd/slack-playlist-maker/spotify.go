@@ -45,6 +45,8 @@ func awaitClient(ctx context.Context, config Config) (*spotify.Client, error) {
 		server         = NewServer(spotifyHandler, config.ListenAddress)
 	)
 
+	server.Start()
+
 	log.Println("Visit this link to login to Spotify:", url)
 
 	var client *spotify.Client
@@ -54,12 +56,13 @@ func awaitClient(ctx context.Context, config Config) (*spotify.Client, error) {
 		log.Println("Context closed before Spotify Client was acquired")
 		return nil, ctx.Err()
 	}
-	if err := server.Stop(); err != nil {
-		log.Println("Error stopping http server:", err)
-	}
 
 	if err := validateUser(client, spotify.ID(config.SpotifyPlaylistID)); err != nil {
 		return nil, err
+	}
+
+	if err := server.Stop(); err != nil {
+		log.Println("Error stopping http server:", err)
 	}
 
 	return client, nil
